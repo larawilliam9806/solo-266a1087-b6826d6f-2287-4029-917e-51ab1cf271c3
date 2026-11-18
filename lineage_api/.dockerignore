@@ -8,6 +8,5 @@ data/
 *.db-wal
 *.db-shm
 tests/
-demo/
 README.md
 .gitignore

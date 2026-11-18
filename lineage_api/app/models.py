@@ -61,13 +61,9 @@ class OutputRef(BaseModel):
         return v
 
 
-class JobRunRegisterRequest(BaseModel):
-    """登记一次清洗 / 月汇总等作业的完成记录（含实际读写的分区版本）。"""
+class _IOSpec(BaseModel):
+    """作业输入/产出声明的公共部分（任务分派与直接登记共用校验规则）。"""
 
-    run_id: str = Field(..., min_length=1, description="作业运行唯一 ID，重复提交为幂等冲突")
-    job_name: str = Field(..., min_length=1)
-    job_type: str = Field(..., min_length=1)
-    finished_at: str = Field(..., min_length=1)
     inputs: list[InputRef] = Field(..., min_length=1)
     outputs: list[OutputRef] = Field(..., min_length=1)
 
@@ -87,6 +83,15 @@ class JobRunRegisterRequest(BaseModel):
         import json
 
         return json.dumps(partition_key, sort_keys=True, ensure_ascii=False)
+
+
+class JobRunRegisterRequest(_IOSpec):
+    """登记一次清洗 / 月汇总等作业的完成记录（含实际读写的分区版本）。"""
+
+    run_id: str = Field(..., min_length=1, description="作业运行唯一 ID，重复提交为幂等冲突")
+    job_name: str = Field(..., min_length=1)
+    job_type: str = Field(..., min_length=1)
+    finished_at: str = Field(..., min_length=1)
 
 
 class JobRunInfo(BaseModel):
@@ -130,3 +135,80 @@ class StaleResponse(BaseModel):
 class ErrorResponse(BaseModel):
     error_code: str
     message: str
+    details: dict[str, Any] | None = None
+
+
+# --------------------------------------------------------------------------- #
+# 任务分派（重跑作业 -> 外部执行器）
+# --------------------------------------------------------------------------- #
+TaskStatus = Literal["PENDING", "CLAIMED", "SUCCEEDED", "NEEDS_RESCHEDULE"]
+
+
+class TaskSubmitRequest(_IOSpec):
+    """提交一个待执行作业任务：固定作业信息、实际输入与预定产出版本。"""
+
+    task_id: str = Field(..., min_length=1, description="任务唯一 ID，重复提交为幂等冲突")
+    job_name: str = Field(..., min_length=1)
+    job_type: str = Field(..., min_length=1)
+
+
+class TaskClaimRequest(BaseModel):
+    """执行器领取任务：返回有期限的完成凭证。"""
+
+    executor_id: str = Field(..., min_length=1, description="执行器标识")
+    lease_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        le=86400,
+        description="凭证有效期（秒）；不填用服务端默认值 LINEAGE_TASK_LEASE_SECONDS",
+    )
+
+
+class LeaseInfo(BaseModel):
+    executor_id: str
+    claimed_at: str
+    expires_at: str
+    expired: bool = Field(..., description="按服务端当前时间判断是否已过期")
+
+
+class TaskClaimResponse(BaseModel):
+    task_id: str
+    status: Literal["CLAIMED"]
+    claim_token: str = Field(..., description="完成回报凭证，仅在本次响应中下发")
+    executor_id: str
+    claimed_at: str
+    expires_at: str
+    lease_seconds: int
+
+
+class TaskCompleteRequest(BaseModel):
+    """执行器回报完成：凭当前未过期凭证登记产出。"""
+
+    claim_token: str = Field(..., min_length=1)
+    finished_at: str | None = Field(
+        default=None, min_length=1, description="作业完成时间（ISO 字符串）；不填取服务端当前时间"
+    )
+
+
+class TaskCompleteResponse(BaseModel):
+    task_id: str
+    status: Literal["SUCCEEDED"]
+    run_id: str = Field(..., description="本次登记生成的作业运行 ID（task:<task_id>）")
+    replayed: bool = Field(
+        ..., description="true 表示成功回执丢失后的原凭证重报，直接返回原结果、未重复登记"
+    )
+    job_run: JobRunInfo
+
+
+class TaskInfo(BaseModel):
+    task_id: str
+    status: TaskStatus
+    job_name: str
+    job_type: str
+    inputs: list[InputRef]
+    outputs: list[OutputRef]
+    run_id: str | None = Field(..., description="成功后关联的作业运行 ID")
+    lease: LeaseInfo | None = Field(..., description="最近一次领取信息（不含凭证）")
+    status_detail: str | None = Field(..., description="状态诊断信息，如需重新安排的原因")
+    created_at: str
+    updated_at: str

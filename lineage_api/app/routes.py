@@ -16,6 +16,12 @@ from .models import (
     PartitionInfo,
     PartitionRegisterRequest,
     StaleResponse,
+    TaskClaimRequest,
+    TaskClaimResponse,
+    TaskCompleteRequest,
+    TaskCompleteResponse,
+    TaskInfo,
+    TaskSubmitRequest,
 )
 from .service import DomainError
 
@@ -131,10 +137,78 @@ def stale_outputs(session=Depends(get_conn)):
         return StaleResponse(stale_outputs=items, count=len(items))
 
 
+# --------------------------------------------------------------------------- #
+# 任务分派：提交 -> 领取（有期限凭证）-> 完成回报 -> 状态查询
+# --------------------------------------------------------------------------- #
+@router.post(
+    "/tasks",
+    response_model=TaskInfo,
+    status_code=201,
+    responses={409: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+    tags=["任务分派"],
+    summary="提交待执行作业任务（固定作业信息、实际输入与预定产出版本）",
+)
+def submit_task(req: TaskSubmitRequest, session=Depends(get_conn)):
+    with session as conn:
+        return service.submit_task(conn, req)
+
+
+@router.get(
+    "/tasks",
+    response_model=list[TaskInfo],
+    tags=["任务分派"],
+    summary="列出任务，可按状态过滤（PENDING/CLAIMED/SUCCEEDED/NEEDS_RESCHEDULE）",
+)
+def list_tasks(
+    status: str | None = Query(default=None, description="按任务状态过滤"),
+    session=Depends(get_conn),
+):
+    if status is not None and status not in ("PENDING", "CLAIMED", "SUCCEEDED", "NEEDS_RESCHEDULE"):
+        raise DomainError(400, "INVALID_TASK_STATUS", f"非法任务状态：{status}")
+    with session as conn:
+        return service.list_tasks(conn, status)
+
+
+@router.get(
+    "/tasks/{task_id}",
+    response_model=TaskInfo,
+    tags=["任务分派"],
+    summary="查询单个任务状态（含当前领取信息，不含凭证）",
+    responses={404: {"model": ErrorResponse}},
+)
+def get_task(task_id: str, session=Depends(get_conn)):
+    with session as conn:
+        return service.get_task(conn, task_id)
+
+
+@router.post(
+    "/tasks/{task_id}/claim",
+    response_model=TaskClaimResponse,
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+    tags=["任务分派"],
+    summary="领取任务：签发有期限的完成凭证；并发领取只成功一个，过期后可接管",
+)
+def claim_task(task_id: str, req: TaskClaimRequest, session=Depends(get_conn)):
+    with session as conn:
+        return service.claim_task(conn, task_id, req)
+
+
+@router.post(
+    "/tasks/{task_id}/complete",
+    response_model=TaskCompleteResponse,
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+    tags=["任务分派"],
+    summary="凭当前未过期凭证回报完成：任务状态与多产出血缘登记同事务生效",
+)
+def complete_task(task_id: str, req: TaskCompleteRequest, session=Depends(get_conn)):
+    with session as conn:
+        return service.complete_task(conn, task_id, req)
+
+
 def domain_error_handler(_request: Request, exc: DomainError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content=ErrorResponse(
-            error_code=exc.error_code, message=exc.message
-        ).model_dump(),
+            error_code=exc.error_code, message=exc.message, details=exc.details
+        ).model_dump(exclude_none=True),
     )

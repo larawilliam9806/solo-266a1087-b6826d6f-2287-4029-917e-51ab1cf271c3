@@ -7,6 +7,8 @@ services:
       - "8000:8000"
     environment:
       LINEAGE_DB_PATH: /data/lineage.db
+      # 任务凭证默认有效期（秒），领取时也可按请求覆盖
+      LINEAGE_TASK_LEASE_SECONDS: "300"
     volumes:
       - lineage-data:/data
     healthcheck:
@@ -16,6 +18,18 @@ services:
       retries: 5
       start_period: 5s
     restart: unless-stopped
+
+  # 一键演示：docker compose --profile demo run --rm demo
+  # （任务分派全流程：提交 -> 领取 -> 完成 -> 接管 -> 重新安排）
+  demo:
+    build: .
+    image: partition-lineage-api:latest
+    container_name: partition-lineage-demo
+    profiles: ["demo"]
+    depends_on:
+      lineage-api:
+        condition: service_healthy
+    command: ["python", "demo/run_dispatch_demo.py", "--base-url", "http://lineage-api:8000"]
 
 volumes:
   lineage-data:

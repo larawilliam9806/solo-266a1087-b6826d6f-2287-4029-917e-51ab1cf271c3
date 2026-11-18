@@ -25,7 +25,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
         description=(
             "登记门店原始日分区版本与清洗/月汇总作业记录，"
             "保留各版实际读取与产出的分区版本，"
-            "查询过期产出及通往更正源头的依赖路径，用于安排重跑。"
+            "查询过期产出及通往更正源头的依赖路径，用于安排重跑；"
+            "并支持把待重跑作业作为任务分派给外部执行器"
+            "（提交任务 -> 领取有期限凭证 -> 凭凭证回报完成，产出登记与任务状态原子生效）。"
         ),
     )
     effective_db = db_path or os.environ.get("LINEAGE_DB_PATH", DB_PATH)
@@ -69,6 +71,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 for table in (
+                    "task_leases",
+                    "tasks",
                     "job_output_inputs",
                     "job_outputs",
                     "job_inputs",

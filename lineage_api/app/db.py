@@ -78,6 +78,36 @@ CREATE TABLE IF NOT EXISTS job_output_inputs (
 CREATE INDEX IF NOT EXISTS idx_job_inputs_run ON job_inputs (run_id);
 CREATE INDEX IF NOT EXISTS idx_job_outputs_lookup ON job_outputs (partition_key, version);
 CREATE INDEX IF NOT EXISTS idx_job_output_inputs_out ON job_output_inputs (output_partition_id);
+
+-- 任务分派：提交时固定作业信息、实际输入与预定产出版本（JSON 快照），
+-- 之后输入分区被更正也不影响任务内已固定的版本，完成时再校验是否仍有效。
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id         TEXT PRIMARY KEY,       -- 调用方提供的任务唯一 ID（幂等键）
+    job_name        TEXT NOT NULL,
+    job_type        TEXT NOT NULL,
+    inputs_json     TEXT NOT NULL,          -- 固定的实际输入 [{partition_key, version}, ...]
+    outputs_json    TEXT NOT NULL,          -- 预定产出 [{partition_key, version, partition_type, input_indices}, ...]
+    status          TEXT NOT NULL DEFAULT 'PENDING'
+                    CHECK (status IN ('PENDING', 'CLAIMED', 'SUCCEEDED', 'NEEDS_RESCHEDULE')),
+    run_id          TEXT,                   -- 成功后关联的 job_runs.run_id
+    completed_token TEXT,                   -- 完成该任务的凭证（用于原凭证重报的幂等回放）
+    status_detail   TEXT,                   -- 诊断信息（如需重新安排的原因）
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- 领取记录（租约）：每次领取/接管追加一行，当前租约为该任务 lease_seq 最大的一行。
+-- 全部落库，服务重启后领取状态不丢失。
+CREATE TABLE IF NOT EXISTS task_leases (
+    lease_seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         TEXT NOT NULL REFERENCES tasks(task_id),
+    claim_token     TEXT NOT NULL UNIQUE,   -- 完成回报凭证
+    executor_id     TEXT NOT NULL,
+    claimed_at      TEXT NOT NULL,
+    expires_at      TEXT NOT NULL           -- 超过即过期，可被其他执行器接管
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_leases_task ON task_leases (task_id, lease_seq);
 """
 
 
